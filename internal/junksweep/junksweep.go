@@ -1,14 +1,15 @@
-package main
+package junksweep
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/spf13/cobra"
 )
 
 // Patterns of files considered junk/temp
@@ -152,45 +153,50 @@ func deleteFilesConcurrent(files []string, workers int) {
 	wg.Wait()
 }
 
-func main() {
-	dir := flag.String("dir", "", "Directory to scan for temp files (required)")
-	outPath := flag.String("out", "", "Optional output file to save the list")
-	workers := flag.Int("workers", 0, "Number of concurrent workers (default = NumCPU)")
-	flag.Parse()
+// Cmd is the cobra command for "ds junksweep"
+var Cmd = &cobra.Command{
+	Use:   "junksweep",
+	Short: "Find and optionally delete temporary/junk files",
+	RunE:  run,
+}
 
-	if *dir == "" {
-		fmt.Println("Error: -dir argument is required")
-		flag.Usage()
-		os.Exit(1)
+func init() {
+	Cmd.Flags().StringP("dir", "d", "", "directory to scan (required)")
+	Cmd.Flags().StringP("out", "o", "", "optional file to save list")
+	Cmd.Flags().IntP("workers", "w", 0, "workers (0 = NumCPU)")
+}
+
+func run(cmd *cobra.Command, args []string) error {
+	dir, _ := cmd.Flags().GetString("dir")
+	outPath, _ := cmd.Flags().GetString("out")
+	workers, _ := cmd.Flags().GetInt("workers")
+
+	if dir == "" {
+		return fmt.Errorf("flag -dir is required")
 	}
 
-	fmt.Println("Scanning directory:", *dir)
-	files, err := scanFilesConcurrent(*dir, *workers)
+	fmt.Println("Scanning directory:", dir)
+	files, err := scanFilesConcurrent(dir, workers)
 	if err != nil {
-		fmt.Println("Error scanning directory:", err)
-		os.Exit(1)
+		return err
 	}
-
 	if len(files) == 0 {
 		fmt.Println("No temporary or junk files found.")
-		return
+		return nil
+	}
+	if err := outputFiles(files, outPath); err != nil {
+		return err
 	}
 
-	if err := outputFiles(files, *outPath); err != nil {
-		fmt.Println("Error writing output:", err)
-		os.Exit(1)
-	}
-
-	// Ask user for confirmation
-	fmt.Printf("\nDo you want to delete these %d files? (Y/y/yes only to confirm): ", len(files))
+	fmt.Printf("\nDo you want to delete these %d files? (y/yes): ", len(files))
 	reader := bufio.NewReader(os.Stdin)
 	resp, _ := reader.ReadString('\n')
 	resp = strings.TrimSpace(strings.ToLower(resp))
-
 	if resp == "y" || resp == "yes" {
-		deleteFilesConcurrent(files, *workers)
+		deleteFilesConcurrent(files, workers)
 		fmt.Println("Deletion complete.")
 	} else {
 		fmt.Println("No files were deleted.")
 	}
+	return nil
 }

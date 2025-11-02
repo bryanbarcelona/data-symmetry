@@ -1,13 +1,14 @@
-package main
+package twincheck
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 // File map type
@@ -125,44 +126,53 @@ func compareDrives(filesA, filesB FileMap, mode string, outFile *os.File) {
 	}
 }
 
-func main() {
-	// CLI arguments
-	driveA := flag.String("a", "", "Path to Drive A (required)")
-	driveB := flag.String("b", "", "Path to Drive B (required)")
-	mode := flag.String("mode", "all", "Mode: all | missing_a | missing_b")
-	outPath := flag.String("out", "", "Optional output file path")
-	flag.Parse()
+// Cmd is the cobra command for "ds twincheck"
+var Cmd = &cobra.Command{
+	Use:   "twincheck",
+	Short: "Compare two directory trees concurrently",
+	RunE:  run,
+}
 
-	if *driveA == "" || *driveB == "" {
-		fmt.Println("Error: Both drive paths are required.")
-		flag.Usage()
-		os.Exit(1)
+func init() {
+	Cmd.Flags().StringP("a", "a", "", "path to Drive A (required)")
+	Cmd.Flags().StringP("b", "b", "", "path to Drive B (required)")
+	Cmd.Flags().StringP("mode", "m", "all", "comparison mode: all | missing_a | missing_b")
+	Cmd.Flags().StringP("out", "o", "", "optional output file")
+}
+
+func run(cmd *cobra.Command, args []string) error {
+	driveA, _ := cmd.Flags().GetString("a")
+	driveB, _ := cmd.Flags().GetString("b")
+	mode, _ := cmd.Flags().GetString("mode")
+	outPath, _ := cmd.Flags().GetString("out")
+
+	if driveA == "" || driveB == "" {
+		return fmt.Errorf("both -a and -b flags are required")
 	}
 
 	var outFile *os.File
-	var err error
-	if *outPath != "" {
-		outFile, err = os.Create(*outPath)
+	if outPath != "" {
+		var err error
+		outFile, err = os.Create(outPath)
 		if err != nil {
-			fmt.Println("Error creating output file:", err)
-			os.Exit(1)
+			return err
 		}
 		defer outFile.Close()
 	}
 
 	start := time.Now()
+	output(outFile, fmt.Sprintf("Scanning %s...", driveA))
+	filesA, _ := getFilesConcurrent(driveA)
+	output(outFile, fmt.Sprintf("Found %d files in %s", len(filesA), driveA))
 
-	output(outFile, fmt.Sprintf("Scanning %s...", *driveA))
-	filesA, _ := getFilesConcurrent(*driveA)
-	output(outFile, fmt.Sprintf("Found %d files in %s", len(filesA), *driveA))
-
-	output(outFile, fmt.Sprintf("Scanning %s...", *driveB))
-	filesB, _ := getFilesConcurrent(*driveB)
-	output(outFile, fmt.Sprintf("Found %d files in %s", len(filesB), *driveB))
+	output(outFile, fmt.Sprintf("Scanning %s...", driveB))
+	filesB, _ := getFilesConcurrent(driveB)
+	output(outFile, fmt.Sprintf("Found %d files in %s", len(filesB), driveB))
 
 	output(outFile, "\nComparing drives...")
-	compareDrives(filesA, filesB, *mode, outFile)
+	compareDrives(filesA, filesB, mode, outFile)
 
 	elapsed := time.Since(start)
 	output(outFile, fmt.Sprintf("\nComparison complete. No files were modified or deleted.\nTime taken: %s", elapsed))
+	return nil
 }
