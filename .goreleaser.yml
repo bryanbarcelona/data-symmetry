@@ -1,0 +1,25 @@
+version: 2
+before:
+  hooks: [go mod tidy, go test ./...]
+builds:
+  - id: ds
+    main: ./cmd/ds
+    binary: ds
+    goos: [windows, darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags: -s -w -X github.com/bryanbarcelona/data-symmetry/internal/build.Version={{.Version}}
+archives:
+  - format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+release:
+  github:
+    owner: bryanbarcelona
+    name: data-symmetry
