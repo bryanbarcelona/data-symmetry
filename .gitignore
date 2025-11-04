@@ -24,5 +24,8 @@ go.work
 # Text files
 *.txt
 
+# Photoshop files
+*.psd
+
 # GoReleaser dist folder
 dist/
