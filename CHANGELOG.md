@@ -5,7 +5,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [Added] - 2024-01-XX
+## [Added]
 - **New `dupekill` command**: Deduplication tool for removing duplicate files across directory trees
 - **Reference-based cleanup**: Uses a reference tree (never modified) and cleanup trees (files removed from)
 - **Multiple modes**:
