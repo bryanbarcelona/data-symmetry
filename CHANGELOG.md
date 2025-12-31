@@ -3,6 +3,21 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-01-01
+
+### Added
+- **New `cachewhack` command**: System-wide cache-folder exterminator  
+  - Auto-discovers cache directories for Chrome, Edge, VS Code, npm, pip, JetBrains IDEs, Adobe, OS temp folders, etc.  
+  - Cross-platform roots: Windows (`%LOCALAPPDATA%`, `%WINDIR%\Temp`), macOS (`~/Library/Caches`), Linux (`/tmp`, `~/.cache`)  
+  - Depth-limited scanning (e.g., 1 level for `%LOCALAPPDATA%` to avoid collateral damage)  
+  - Glob patterns + deny-list (`package cache`, `slstore`) for safety  
+  - Dry-run by default; shows human-readable size summary (`1.2 GB (1 234 MB)`)  
+  - `--empty` flag: wipe contents but keep folder structure  
+  - Concurrent workers (8) for fast cleanup  
+  - Interactive “y/N” prompt before destructive operations  
+
+[0.3.0]: https://github.com/bryanbarcelona/data-symmetry/releases/tag/v0.3.0
+
 ## [0.2.0] - 2025-12-30
 
 ## [Added]
@@ -19,6 +34,8 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Empty directory cleanup**: Automatically removes empty directories after deduplication (configurable with `--keep-empty-dirs`)
 - **Cross-platform support**: Windows path handling with proper escaping
 - **Concurrent scanning**: Uses twincheck's proven concurrent directory walking pattern
+
+[0.2.0]: https://github.com/bryanbarcelona/data-symmetry/releases/tag/v0.2.0
 
 ## [0.1.0] - 2025-11-02
 
