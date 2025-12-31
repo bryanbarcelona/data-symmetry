@@ -36,6 +36,15 @@ Automatically removes duplicate files from one or more "cleanup" directories tha
       * **`path+hash`**: Requires the same relative path *and* file content (hash).
       * **`hash`**: Only requires the same file content (hash) to be considered a duplicate.
 
+### 4\. `cachewhack`
+
+System-wide cache-folder exterminator. Discovers and safely deletes (or empties) application and OS cache directories, freeing disk space without harming user data.
+
+  * **Auto-Discovery**: Chrome, Edge, VS Code, npm, pip, JetBrains IDEs, Adobe, OS temp folders, etc.
+  * **Cross-Platform**: Windows (`%LOCALAPPDATA%`, `%WINDIR%\Temp`), macOS (`~/Library/Caches`), Linux (`/tmp`, `~/.cache`).
+  * **Safety First**: Dry-run by default, depth-limited scanning, deny-list protection, interactive confirmation.
+  * **Flexible**: `--empty` flag wipes contents while preserving folder structure; concurrent workers for speed.
+
 -----
 
 ## 💻 Installation
@@ -96,12 +105,33 @@ ds dupekill --reference /master/photos --cleanup /photos/unsorted --cleanup /pho
 
 # Use the 'path+name' mode for quick, safe cleanup
 ds dupekill --reference /master/files --cleanup /temp/downloaded --mode path+name
-```V
+```
 
 For more details on flags for any command, use the `--help` flag:
 
 ```bash
 ds dupekill --help
+```
+
+### `ds cachewhack` Example
+
+Preview then purge system caches.
+
+```bash
+# Dry-run: see what would be deleted and how much space is reclaimable
+ds cachewhack
+
+# Actually delete the discovered cache folders (prompts for confirmation)
+ds cachewhack --force
+
+# Empty folders instead of deleting them (keeps directory structure)
+ds cachewhack -f -e
+```V
+
+For more details on flags for any command, use the `--help` flag:
+
+```bash
+ds cachewhack --help
 ```
 
 -----
@@ -115,3 +145,15 @@ Contributions are welcome\! Please feel free to open an issue or submit a pull r
 ## 📄 License
 
 This project is licensed under the **MIT License**.
+
+---
+
+## 🤖 AI Usage Declaration
+
+Congratulations! You’ve officially found the part of this README that is legally obligated to tell you: yes, a robot helped write this.
+
+Every word has been personally vetted by me, your fearless human editor, in between existential debates with my In-N-Out burger. The robot did the typing, sure, but the seasoning? That’s all human. So rest easy: this README is 100% human-approved, slightly onion-scented, and may cause sudden urges to visit fast-food joints.
+
+---
+
+© 2025 Bryan Barcelona. All rights reserved.
