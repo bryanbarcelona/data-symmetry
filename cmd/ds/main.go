@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/bryanbarcelona/data-symmetry/internal/build"
+	"github.com/bryanbarcelona/data-symmetry/internal/cachewhack"
 	"github.com/bryanbarcelona/data-symmetry/internal/dupekill"
 	"github.com/bryanbarcelona/data-symmetry/internal/junksweep"
 	"github.com/bryanbarcelona/data-symmetry/internal/twincheck"
@@ -16,6 +17,7 @@ func main() {
 	root.AddCommand(junksweep.Cmd)
 	root.AddCommand(twincheck.Cmd)
 	root.AddCommand(dupekill.Cmd)
+	root.AddCommand(cachewhack.Cmd)
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
