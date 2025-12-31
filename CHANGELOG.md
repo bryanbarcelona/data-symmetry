@@ -3,7 +3,7 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2025-12-30
 
 ## [Added]
 - **New `dupekill` command**: Deduplication tool for removing duplicate files across directory trees
