@@ -1,4 +1,3 @@
-// mytool/dupekill/dupekill.go
 package dupekill
 
 import (
@@ -19,6 +18,7 @@ import (
 type Mode string
 
 const (
+	ModePathOnly Mode = "path"
 	ModePathName Mode = "path+name"
 	ModePathHash Mode = "path+hash"
 	ModeHashOnly Mode = "hash"
@@ -157,7 +157,7 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, out *os.Fil
 	fmt.Fprintf(out, "Finding duplicates using %s mode...\n", mode)
 
 	// Hash files if needed for hash-based modes
-	if mode != ModePathName {
+	if mode == ModePathHash || mode == ModeHashOnly {
 		fmt.Fprintln(out, "Computing file hashes...")
 		hashFiles(referenceFiles)
 		hashFiles(cleanupFiles)
@@ -166,6 +166,11 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, out *os.Fil
 	// Build reference index
 	referenceIndex := make(map[string]*file)
 	switch mode {
+	case ModePathOnly: // NEW CASE
+		for _, f := range referenceFiles {
+			// Pure path-only matching: just the relative path
+			referenceIndex[f.rel] = f
+		}
 	case ModePathName:
 		for _, f := range referenceFiles {
 			// For path+name, include size in the key to ensure exact match
@@ -192,6 +197,8 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, out *os.Fil
 	for _, cleanupFile := range cleanupFiles {
 		var key string
 		switch mode {
+		case ModePathOnly:
+			key = cleanupFile.rel
 		case ModePathName:
 			// Include size in the key for exact matching
 			key = cleanupFile.rel + "|" + fmt.Sprintf("%d", cleanupFile.size)
@@ -358,8 +365,8 @@ func run(cmd *cobra.Command, args []string) error {
 	keepEmptyDirs, _ := cmd.Flags().GetBool("keep-empty-dirs")
 
 	mode := Mode(modeStr)
-	if mode != ModePathName && mode != ModePathHash && mode != ModeHashOnly {
-		return fmt.Errorf("invalid mode: %s (use: path+name, path+hash, hash)", modeStr)
+	if mode != ModePathOnly && mode != ModePathName && mode != ModePathHash && mode != ModeHashOnly {
+		return fmt.Errorf("invalid mode: %s (use: path, path+name, path+hash, hash)", modeStr)
 	}
 
 	if len(cleanup) == 0 {
@@ -374,6 +381,12 @@ func run(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		defer outFile.Close()
+	}
+
+	if mode == ModePathOnly && outFile != nil {
+		fmt.Fprintln(outFile, "\n⚠️  WARNING: Using 'path' mode - files matched by path ONLY!")
+		fmt.Fprintln(outFile, "   Files with different content but same path will be considered duplicates.")
+		fmt.Fprintln(outFile, "   This is UNSAFE unless you have identical directory structures.")
 	}
 
 	start := time.Now()
@@ -450,7 +463,7 @@ var Cmd = &cobra.Command{
 func init() {
 	Cmd.Flags().String("reference", "", "reference tree (files to keep, never modified)")
 	Cmd.Flags().StringSlice("cleanup", nil, "trees to clean up (remove duplicates from)")
-	Cmd.Flags().String("mode", "hash", "dedup mode: path+name | path+hash | hash")
+	Cmd.Flags().String("mode", "hash", "dedup mode: path | path+name | path+hash | hash")
 	Cmd.Flags().String("move-to", "", "move duplicates to directory")
 	Cmd.Flags().String("out", "", "output report file")
 	Cmd.Flags().Bool("keep-empty-dirs", false, "keep empty directories (default: remove them after deduplication)")
