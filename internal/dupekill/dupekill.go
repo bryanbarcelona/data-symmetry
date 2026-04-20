@@ -12,16 +12,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 )
 
 type Mode string
 
 const (
-	ModePathOnly Mode = "path"
-	ModePathName Mode = "path+name"
-	ModePathHash Mode = "path+hash"
-	ModeHashOnly Mode = "hash"
+	ModePathOnly     Mode = "path"
+	ModePathSize     Mode = "path+size"
+	ModePathHash     Mode = "path+hash"
+	ModeHashOnly     Mode = "hash"
+	ModeFilenameSize Mode = "filename+size" // NEW: matches on basename + size only
 )
 
 type file struct {
@@ -37,7 +39,15 @@ type duplicate struct {
 	cleanup   []*file // duplicates in cleanup trees
 }
 
-func scanTree(root string) ([]*file, error) {
+// normalizeForComparison lowercases input when case-insensitive matching is enabled
+func normalizeForComparison(s string, ignoreCase bool) string {
+	if ignoreCase {
+		return strings.ToLower(s)
+	}
+	return s
+}
+
+func scanTree(root string, out io.Writer) ([]*file, error) {
 	var files []*file
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -45,6 +55,22 @@ func scanTree(root string) ([]*file, error) {
 	if !strings.HasSuffix(root, string(filepath.Separator)) {
 		root += string(filepath.Separator)
 	}
+
+	// Create progress bar for scanning (spinner mode since we don't know total)
+	bar := progressbar.NewOptions64(-1,
+		progressbar.OptionSetDescription("Scanning "+root),
+		progressbar.OptionSetWriter(out),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSpinnerType(14),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "█",
+			SaucerHead:    "█",
+			SaucerPadding: "░",
+			BarStart:      "|",
+			BarEnd:        "|",
+		}),
+	)
+	defer bar.Finish()
 
 	var scanDir func(string)
 	scanDir = func(current string) {
@@ -75,6 +101,7 @@ func scanTree(root string) ([]*file, error) {
 					size: info.Size(),
 				})
 				mu.Unlock()
+				bar.Add(1)
 			}
 		}
 	}
@@ -85,7 +112,7 @@ func scanTree(root string) ([]*file, error) {
 	return files, nil
 }
 
-func hashFiles(files []*file) {
+func hashFiles(files []*file, out io.Writer) {
 	type job struct {
 		index int
 		file  *file
@@ -94,6 +121,21 @@ func hashFiles(files []*file) {
 	if len(files) == 0 {
 		return
 	}
+
+	// Create progress bar for hashing
+	bar := progressbar.NewOptions64(int64(len(files)),
+		progressbar.OptionSetDescription("Computing file hashes"),
+		progressbar.OptionSetWriter(out),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "█",
+			SaucerHead:    "█",
+			SaucerPadding: "░",
+			BarStart:      "|",
+			BarEnd:        "|",
+		}),
+	)
+	defer bar.Finish()
 
 	jobs := make(chan job, len(files))
 	results := make(chan struct {
@@ -119,6 +161,7 @@ func hashFiles(files []*file) {
 						hash  string
 					}{job.index, hash}
 				}
+				bar.Add(1)
 			}
 		}()
 	}
@@ -153,34 +196,39 @@ func computeHash(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, out *os.File) []duplicate {
-	fmt.Fprintf(out, "Finding duplicates using %s mode...\n", mode)
+func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase bool, out *os.File) []duplicate {
+	fmt.Fprintf(out, "Finding duplicates using %s mode (case-insensitive: %v)...\n", mode, ignoreCase)
 
 	// Hash files if needed for hash-based modes
 	if mode == ModePathHash || mode == ModeHashOnly {
 		fmt.Fprintln(out, "Computing file hashes...")
-		hashFiles(referenceFiles)
-		hashFiles(cleanupFiles)
+		hashFiles(referenceFiles, os.Stdout)
+		hashFiles(cleanupFiles, os.Stdout)
 	}
 
 	// Build reference index
 	referenceIndex := make(map[string]*file)
 	switch mode {
-	case ModePathOnly: // NEW CASE
+	case ModePathOnly:
 		for _, f := range referenceFiles {
-			// Pure path-only matching: just the relative path
-			referenceIndex[f.rel] = f
+			key := normalizeForComparison(f.rel, ignoreCase)
+			referenceIndex[key] = f
 		}
-	case ModePathName:
+	case ModePathSize:
 		for _, f := range referenceFiles {
-			// For path+name, include size in the key to ensure exact match
-			key := f.rel + "|" + fmt.Sprintf("%d", f.size)
+			key := normalizeForComparison(f.rel, ignoreCase) + "|" + fmt.Sprintf("%d", f.size)
+			referenceIndex[key] = f
+		}
+	case ModeFilenameSize: // NEW MODE
+		for _, f := range referenceFiles {
+			key := normalizeForComparison(filepath.Base(f.rel), ignoreCase) + "|" + fmt.Sprintf("%d", f.size)
 			referenceIndex[key] = f
 		}
 	case ModePathHash:
 		for _, f := range referenceFiles {
 			if f.hash != "" {
-				referenceIndex[f.rel+"|"+f.hash] = f
+				key := normalizeForComparison(f.rel, ignoreCase) + "|" + f.hash
+				referenceIndex[key] = f
 			}
 		}
 	case ModeHashOnly:
@@ -198,13 +246,14 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, out *os.Fil
 		var key string
 		switch mode {
 		case ModePathOnly:
-			key = cleanupFile.rel
-		case ModePathName:
-			// Include size in the key for exact matching
-			key = cleanupFile.rel + "|" + fmt.Sprintf("%d", cleanupFile.size)
+			key = normalizeForComparison(cleanupFile.rel, ignoreCase)
+		case ModePathSize:
+			key = normalizeForComparison(cleanupFile.rel, ignoreCase) + "|" + fmt.Sprintf("%d", cleanupFile.size)
+		case ModeFilenameSize: // NEW MODE
+			key = normalizeForComparison(filepath.Base(cleanupFile.rel), ignoreCase) + "|" + fmt.Sprintf("%d", cleanupFile.size)
 		case ModePathHash:
 			if cleanupFile.hash != "" {
-				key = cleanupFile.rel + "|" + cleanupFile.hash
+				key = normalizeForComparison(cleanupFile.rel, ignoreCase) + "|" + cleanupFile.hash
 			}
 		case ModeHashOnly:
 			if cleanupFile.hash != "" {
@@ -363,10 +412,11 @@ func run(cmd *cobra.Command, args []string) error {
 	moveTo, _ := cmd.Flags().GetString("move-to")
 	outPath, _ := cmd.Flags().GetString("out")
 	keepEmptyDirs, _ := cmd.Flags().GetBool("keep-empty-dirs")
+	ignoreCase, _ := cmd.Flags().GetBool("ignore-case")
 
 	mode := Mode(modeStr)
-	if mode != ModePathOnly && mode != ModePathName && mode != ModePathHash && mode != ModeHashOnly {
-		return fmt.Errorf("invalid mode: %s (use: path, path+name, path+hash, hash)", modeStr)
+	if mode != ModePathOnly && mode != ModePathSize && mode != ModeFilenameSize && mode != ModePathHash && mode != ModeHashOnly {
+		return fmt.Errorf("invalid mode: %s (use: path, path+size, filename+size, path+hash, hash)", modeStr)
 	}
 
 	if len(cleanup) == 0 {
@@ -393,7 +443,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Scan reference tree
 	output(outFile, fmt.Sprintf("Scanning reference tree: %s", reference))
-	referenceFiles, err := scanTree(reference)
+	referenceFiles, err := scanTree(reference, os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -403,7 +453,7 @@ func run(cmd *cobra.Command, args []string) error {
 	var allCleanupFiles []*file
 	for _, cleanupTree := range cleanup {
 		output(outFile, fmt.Sprintf("Scanning cleanup tree: %s", cleanupTree))
-		cleanupFiles, err := scanTree(cleanupTree)
+		cleanupFiles, err := scanTree(cleanupTree, os.Stdout)
 		if err != nil {
 			return err
 		}
@@ -411,7 +461,7 @@ func run(cmd *cobra.Command, args []string) error {
 		allCleanupFiles = append(allCleanupFiles, cleanupFiles...)
 	}
 
-	duplicates := findDuplicates(referenceFiles, allCleanupFiles, mode, outFile)
+	duplicates := findDuplicates(referenceFiles, allCleanupFiles, mode, ignoreCase, outFile)
 	if len(duplicates) == 0 {
 		output(outFile, "No duplicates found.")
 		return nil
@@ -463,10 +513,11 @@ var Cmd = &cobra.Command{
 func init() {
 	Cmd.Flags().String("reference", "", "reference tree (files to keep, never modified)")
 	Cmd.Flags().StringSlice("cleanup", nil, "trees to clean up (remove duplicates from)")
-	Cmd.Flags().String("mode", "hash", "dedup mode: path | path+name | path+hash | hash")
+	Cmd.Flags().String("mode", "hash", "dedup mode: path | path+size | filename+size | path+hash | hash")
 	Cmd.Flags().String("move-to", "", "move duplicates to directory")
 	Cmd.Flags().String("out", "", "output report file")
 	Cmd.Flags().Bool("keep-empty-dirs", false, "keep empty directories (default: remove them after deduplication)")
+	Cmd.Flags().Bool("ignore-case", true, "case-insensitive path/filename matching (default: true)")
 	Cmd.MarkFlagRequired("reference")
 	Cmd.MarkFlagRequired("cleanup")
 }
