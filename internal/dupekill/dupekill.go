@@ -306,8 +306,6 @@ func processDuplicates(duplicates []duplicate, dryRun bool, delete bool, moveTo 
 		totalDupes += len(dup.cleanup)
 	}
 
-	output(outFile, fmt.Sprintf("\nWould remove %d duplicate files across %d groups", totalDupes, len(duplicates)))
-
 	if dryRun || !delete {
 		for i, dup := range duplicates {
 			output(outFile, fmt.Sprintf("\nGroup %d:", i+1))
@@ -320,6 +318,7 @@ func processDuplicates(duplicates []duplicate, dryRun bool, delete bool, moveTo 
 				output(outFile, fmt.Sprintf("  %s: %s", action, f.abs))
 			}
 		}
+		output(outFile, fmt.Sprintf("\nWould remove %d duplicate files across %d groups", totalDupes, len(duplicates)))
 		output(outFile, "\nDry-run enabled. No files affected.")
 		return nil
 	}
