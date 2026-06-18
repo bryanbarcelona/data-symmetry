@@ -10,7 +10,7 @@ A powerful, high-performance command-line utility built in Go for maintaining or
 
 ## ✨ Features
 
-The tool offers three primary commands, each designed for a specific file management task:
+The tool offers four primary commands, each designed for a specific file management task:
 
 ### 1\. `junksweep`
 
@@ -20,21 +20,38 @@ Finds and optionally deletes common temporary and junk files from a specified di
 
 ### 2\. `twincheck`
 
-Compares the contents of two directory trees to identify differences and discrepancies.
+Compares the contents of two directory trees to identify differences and discrepancies. Read-only — never modifies files.
 
-  * **Comparison Modes**: Supports three levels of content comparison using the `-m` or `--mode` flag:
-      * **`off`**: Compares files based on **path and size only**. No hashing is performed.
-      * **`smart`**: Runs a content hash only on files that are **missing-by-path** between the two trees.
-      * **`strict`**: Performs a **global content hash** comparison for every file, ensuring an exact match of contents, regardless of path differences.
+  * **Hash modes** (`--hash-mode`): Controls hashing behavior:
+      * **`off`** *(default)*: Compares files by **path and size only**. Fast, no hashing.
+      * **`smart`**: Hashes only files that are **missing-by-path** in one tree. Good balance of speed and confidence.
+      * **`strict`**: Full content hash of every file in both trees. Catches renames and moves.
+  * **Report modes** (`--mode` / `-m`): Controls what to display:
+      * **`all`** *(default)*: Show all differences.
+      * **`missing_a`**: Show only files missing from tree A.
+      * **`missing_b`**: Show only files missing from tree B.
+  * **`-H`**: Shorthand for `--hash-mode=smart`.
+  * **`--case-sensitive`**: Enable case-sensitive path comparison. Default is case-insensitive, which is correct for most phone/camera exports vs desktop comparisons.
 
 ### 3\. `dupekill`
 
-Automatically removes duplicate files from one or more "cleanup" directories that also exist in a designated "reference" directory. This is useful for clearing redundancy while protecting a master set of files.
+Removes duplicate files from one or more cleanup directories. Supports two modes of operation:
 
-  * **Duplicate Modes**: Determines how files are considered duplicates:
-      * **`path+name`**: Requires the same relative path *and* file name.
-      * **`path+hash`**: Requires the same relative path *and* file content (hash).
-      * **`hash`**: Only requires the same file content (hash) to be considered a duplicate.
+  * **Reference + Cleanup**: Files in `--cleanup` that also exist in `--reference` are flagged for removal. The reference tree is never modified.
+  * **Internal dedupe**: Pass `--cleanup` alone (no `--reference`) to deduplicate files within a single folder. The alphabetically first path in each duplicate group is kept.
+
+  **Duplicate matching modes** (`--mode`):
+  * **`path`**: Same relative path only. Fast but unsafe unless directory structures are identical.
+  * **`path+size`**: Same relative path and file size.
+  * **`filename+size`**: Same filename and file size, regardless of subdirectory.
+  * **`path+hash`**: Same relative path and content hash.
+  * **`hash`** *(default)*: Same content hash only. Most thorough — catches renamed or moved duplicates.
+
+  **Hashing optimization flags** (applies to `hash` and `path+hash` modes):
+  * **`--partial-hash`**: Instead of reading entire files, hashes three 1 MB segments: the first 1 MB (header), 1 MB from the exact midpoint (center), and the last 1 MB (footer). Files under 3 MB are fully hashed automatically. Dramatically faster for large media collections.
+  * **`--unsafe`**: Requires `--partial-hash`. Skips the full-hash verification pass that runs after partial matches. Near-zero false-positive risk for photos and videos (EXIF headers and compressed frame data at the midpoint are unique per file), but not recommended for arbitrary file types.
+
+  In `hash` mode, a **size pre-filter** always runs first: only files whose size appears in both trees are ever read or hashed. Unique-sized files are skipped entirely.
 
 ### 4\. `cachewhack`
 
@@ -49,14 +66,19 @@ System-wide cache-folder exterminator. Discovers and safely deletes (or empties)
 
 ## 💻 Installation
 
-Since the project is written in Go, you can install it easily using the `go install` command, provided you have a Go environment set up.
+### Pre-built binaries (recommended)
 
-1.  **Install Go:** Ensure you have the latest stable version of Go installed.
-2.  **Install the Tool:**
-    ```bash
-    go install github.com/bryanbarcelona/data-symmetry@latest
-    ```
-3.  **Run:** The executable will be installed as `ds` in your Go bin directory (e.g., `$GOPATH/bin`). Ensure this directory is in your system's `PATH`.
+Download the latest release for your OS and architecture from the [Releases page](https://github.com/bryanbarcelona/data-symmetry/releases). Extract and place `ds` (or `ds.exe` on Windows) somewhere on your `PATH`.
+
+### From source
+
+Requires Go 1.21+.
+
+```bash
+go install github.com/bryanbarcelona/data-symmetry/cmd/ds@latest
+```
+
+The binary will be installed as `ds` in your `$GOPATH/bin`. Make sure that directory is on your `PATH`.
 
 -----
 
@@ -64,58 +86,59 @@ Since the project is written in Go, you can install it easily using the `go inst
 
 The main command is `ds`, followed by the desired sub-command.
 
-### `ds junksweep` Example
-
-Scans a directory for junk files and prints the list to the console.
+### `ds junksweep` Examples
 
 ```bash
-# Scan the 'my-photo-archive' directory
+# Scan a directory for junk files (dry-run)
 ds junksweep --dir /path/to/my-photo-archive
 
 # Scan and save the list to an output file
 ds junksweep -d /path/to/my-photo-archive -o junk_files.txt
 ```
 
-### `ds twincheck` Example
-
-Compares two directories to check for synchronization status.
+### `ds twincheck` Examples
 
 ```bash
-# Basic comparison (path + size only)
-ds twincheck -a /drive/a -b /drive/b -m off
+# Fast comparison: path + size only (no hashing)
+ds twincheck -a /drive/a -b /drive/b
 
-# Smart comparison: hash only files missing by path
-ds twincheck --a /backup/data --b /live/data --mode smart
+# Smart: hash only files missing by path between the two trees
+ds twincheck -a /backup/data -b /live/data -H
 
-# Strict comparison: ensure every file has identical content
-ds twincheck --a /master/disk --b /clone/disk --mode strict -o comparison_report.txt
+# Strict: full content hash of every file in both trees
+ds twincheck -a /master/disk -b /clone/disk --hash-mode strict -o report.txt
+
+# Case-sensitive comparison (default is case-insensitive)
+ds twincheck -a /photos/old-phone -b /photos/new-phone -H --case-sensitive
 ```
 
-### `ds dupekill` Example
-
-Removes duplicates from a cleanup directory against a reference directory.
+### `ds dupekill` Examples
 
 ```bash
-# Delete files in /cleanup/ that are duplicates (by hash) of files in /reference/
-# (Will prompt for confirmation before deleting)
-ds dupekill --reference /path/to/reference --cleanup /path/to/cleanup --mode hash
+# Delete files in /cleanup/ that are duplicates (by content hash) of files in /reference/
+ds dupekill --reference /path/to/reference --cleanup /path/to/cleanup
 
 # Use multiple cleanup directories
-ds dupekill --reference /master/photos --cleanup /photos/unsorted --cleanup /photos/old --mode hash
+ds dupekill --reference /master/photos --cleanup /photos/unsorted --cleanup /photos/old
 
-# Use the 'path+name' mode for quick, safe cleanup
-ds dupekill --reference /master/files --cleanup /temp/downloaded --mode path+name
+# Internal dedupe: remove duplicates within a single folder (keeps alphabetically first)
+ds dupekill --cleanup /path/to/folder --mode hash
+
+# Fast mode for large media libraries: partial hash + size pre-filter + full verify
+ds dupekill --reference /old-phone --cleanup /new-phone --partial-hash
+
+# Fastest mode for trusted sources (e.g. verifying a phone transfer):
+# skips full-hash verify, safe for photos/videos
+ds dupekill --reference /old-phone --cleanup /new-phone --partial-hash --unsafe
+
+# Match by filename + size instead of content (useful when content is guaranteed identical)
+ds dupekill --reference /master --cleanup /incoming --mode filename+size
+
+# Move duplicates to a folder instead of deleting them
+ds dupekill --reference /master --cleanup /archive --move-to /trash/dupes
 ```
 
-For more details on flags for any command, use the `--help` flag:
-
-```bash
-ds dupekill --help
-```
-
-### `ds cachewhack` Example
-
-Preview then purge system caches.
+### `ds cachewhack` Examples
 
 ```bash
 # Dry-run: see what would be deleted and how much space is reclaimable
@@ -126,12 +149,12 @@ ds cachewhack --force
 
 # Empty folders instead of deleting them (keeps directory structure)
 ds cachewhack -f -e
-```V
+```
 
-For more details on flags for any command, use the `--help` flag:
+For full flag details on any command:
 
 ```bash
-ds cachewhack --help
+ds <command> --help
 ```
 
 -----
@@ -150,9 +173,9 @@ This project is licensed under the **MIT License**.
 
 ## 🤖 AI Usage Declaration
 
-Congratulations! You’ve officially found the part of this README that is legally obligated to tell you: yes, a robot helped write this.
+Congratulations! You've officially found the part of this README that is legally obligated to tell you: yes, a robot helped write this.
 
-Every word has been personally vetted by me, your fearless human editor, in between existential debates with my In-N-Out burger. The robot did the typing, sure, but the seasoning? That’s all human. So rest easy: this README is 100% human-approved, slightly onion-scented, and may cause sudden urges to visit fast-food joints.
+Every word has been personally vetted by me, your fearless human editor, in between existential debates with my In-N-Out burger. The robot did the typing, sure, but the seasoning? That's all human. So rest easy: this README is 100% human-approved, slightly onion-scented, and may cause sudden urges to visit fast-food joints.
 
 ---
 
