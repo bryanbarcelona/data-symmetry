@@ -23,7 +23,12 @@ const (
 	ModePathSize     Mode = "path+size"
 	ModePathHash     Mode = "path+hash"
 	ModeHashOnly     Mode = "hash"
-	ModeFilenameSize Mode = "filename+size" // NEW: matches on basename + size only
+	ModeFilenameSize Mode = "filename+size"
+)
+
+const (
+	partialSegmentSize = 1 * 1024 * 1024       // 1 MB per segment
+	partialThreshold   = 3 * partialSegmentSize // files below this are fully hashed
 )
 
 type file struct {
@@ -35,11 +40,10 @@ type file struct {
 }
 
 type duplicate struct {
-	reference *file   // file in reference tree
-	cleanup   []*file // duplicates in cleanup trees
+	reference *file
+	cleanup   []*file
 }
 
-// normalizeForComparison lowercases input when case-insensitive matching is enabled
 func normalizeForComparison(s string, ignoreCase bool) string {
 	if ignoreCase {
 		return strings.ToLower(s)
@@ -56,7 +60,6 @@ func scanTree(root string, out io.Writer) ([]*file, error) {
 		root += string(filepath.Separator)
 	}
 
-	// Create progress bar for scanning (spinner mode since we don't know total)
 	bar := progressbar.NewOptions64(-1,
 		progressbar.OptionSetDescription("Scanning "+root),
 		progressbar.OptionSetWriter(out),
@@ -112,7 +115,7 @@ func scanTree(root string, out io.Writer) ([]*file, error) {
 	return files, nil
 }
 
-func hashFiles(files []*file, out io.Writer) {
+func hashFiles(files []*file, partial bool, out io.Writer) {
 	type job struct {
 		index int
 		file  *file
@@ -122,7 +125,6 @@ func hashFiles(files []*file, out io.Writer) {
 		return
 	}
 
-	// Create progress bar for hashing
 	bar := progressbar.NewOptions64(int64(len(files)),
 		progressbar.OptionSetDescription("Computing file hashes"),
 		progressbar.OptionSetWriter(out),
@@ -154,7 +156,13 @@ func hashFiles(files []*file, out io.Writer) {
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				hash, err := computeHash(job.file.abs)
+				var hash string
+				var err error
+				if partial {
+					hash, err = computePartialHash(job.file.abs, job.file.size)
+				} else {
+					hash, err = computeHash(job.file.abs)
+				}
 				if err == nil {
 					results <- struct {
 						index int
@@ -196,17 +204,95 @@ func computeHash(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase bool, out *os.File) []duplicate {
-	fmt.Fprintf(out, "Finding duplicates using %s mode (case-insensitive: %v)...\n", mode, ignoreCase)
-
-	// Hash files if needed for hash-based modes
-	if mode == ModePathHash || mode == ModeHashOnly {
-		fmt.Fprintln(out, "Computing file hashes...")
-		hashFiles(referenceFiles, os.Stdout)
-		hashFiles(cleanupFiles, os.Stdout)
+// computePartialHash hashes three 1 MB segments (header, center, footer) for
+// files at or above partialThreshold, falling back to a full hash for smaller files.
+func computePartialHash(path string, size int64) (string, error) {
+	if size < partialThreshold {
+		return computeHash(path)
 	}
 
-	// Build reference index
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	buf := make([]byte, partialSegmentSize)
+
+	// Header: first 1 MB
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return computeHash(path)
+	}
+	h.Write(buf)
+
+	// Center: 1 MB from exact midpoint
+	mid := size/2 - partialSegmentSize/2
+	if _, err := f.Seek(mid, io.SeekStart); err != nil {
+		return computeHash(path)
+	}
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return computeHash(path)
+	}
+	h.Write(buf)
+
+	// Footer: last 1 MB
+	if _, err := f.Seek(-int64(partialSegmentSize), io.SeekEnd); err != nil {
+		return computeHash(path)
+	}
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return computeHash(path)
+	}
+	h.Write(buf)
+
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase bool, partial, unsafePartial bool, out *os.File) []duplicate {
+	fmt.Fprintf(out, "Finding duplicates using %s mode (case-insensitive: %v)...\n", mode, ignoreCase)
+	if partial {
+		if unsafePartial {
+			fmt.Fprintln(out, "Partial hash mode: 3×1 MB segments — verification SKIPPED (--unsafe)")
+		} else {
+			fmt.Fprintln(out, "Partial hash mode: 3×1 MB segments — full-hash verify enabled")
+		}
+	}
+
+	if mode == ModePathHash || mode == ModeHashOnly {
+		fmt.Fprintln(out, "Computing file hashes...")
+
+		if mode == ModeHashOnly {
+			// Size pre-filter: only hash files whose size appears in both trees.
+			cleanupSizes := make(map[int64]bool, len(cleanupFiles))
+			for _, f := range cleanupFiles {
+				cleanupSizes[f.size] = true
+			}
+			var filteredRef []*file
+			for _, f := range referenceFiles {
+				if cleanupSizes[f.size] {
+					filteredRef = append(filteredRef, f)
+				}
+			}
+			refSizes := make(map[int64]bool, len(filteredRef))
+			for _, f := range filteredRef {
+				refSizes[f.size] = true
+			}
+			var filteredCleanup []*file
+			for _, f := range cleanupFiles {
+				if refSizes[f.size] {
+					filteredCleanup = append(filteredCleanup, f)
+				}
+			}
+			fmt.Fprintf(out, "Size pre-filter: hashing %d/%d reference, %d/%d cleanup files\n",
+				len(filteredRef), len(referenceFiles), len(filteredCleanup), len(cleanupFiles))
+			hashFiles(filteredRef, partial, os.Stdout)
+			hashFiles(filteredCleanup, partial, os.Stdout)
+		} else {
+			hashFiles(referenceFiles, partial, os.Stdout)
+			hashFiles(cleanupFiles, partial, os.Stdout)
+		}
+	}
+
 	referenceIndex := make(map[string]*file)
 	switch mode {
 	case ModePathOnly:
@@ -219,7 +305,7 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 			key := normalizeForComparison(f.rel, ignoreCase) + "|" + fmt.Sprintf("%d", f.size)
 			referenceIndex[key] = f
 		}
-	case ModeFilenameSize: // NEW MODE
+	case ModeFilenameSize:
 		for _, f := range referenceFiles {
 			key := normalizeForComparison(filepath.Base(f.rel), ignoreCase) + "|" + fmt.Sprintf("%d", f.size)
 			referenceIndex[key] = f
@@ -239,7 +325,6 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 		}
 	}
 
-	// Find duplicates in cleanup trees
 	duplicates := make(map[string]*duplicate)
 
 	for _, cleanupFile := range cleanupFiles {
@@ -249,7 +334,7 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 			key = normalizeForComparison(cleanupFile.rel, ignoreCase)
 		case ModePathSize:
 			key = normalizeForComparison(cleanupFile.rel, ignoreCase) + "|" + fmt.Sprintf("%d", cleanupFile.size)
-		case ModeFilenameSize: // NEW MODE
+		case ModeFilenameSize:
 			key = normalizeForComparison(filepath.Base(cleanupFile.rel), ignoreCase) + "|" + fmt.Sprintf("%d", cleanupFile.size)
 		case ModePathHash:
 			if cleanupFile.hash != "" {
@@ -275,7 +360,33 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 		}
 	}
 
-	// Convert to slice
+	// Safe partial-hash verification: re-confirm each match with a full hash.
+	if mode == ModeHashOnly && partial && !unsafePartial {
+		fmt.Fprintf(out, "Verifying %d partial hash match groups with full hash...\n", len(duplicates))
+		for key, dup := range duplicates {
+			refFull, err := computeHash(dup.reference.abs)
+			if err != nil {
+				delete(duplicates, key)
+				continue
+			}
+			var verified []*file
+			for _, cf := range dup.cleanup {
+				cfFull, err := computeHash(cf.abs)
+				if err != nil {
+					continue
+				}
+				if cfFull == refFull {
+					verified = append(verified, cf)
+				}
+			}
+			if len(verified) == 0 {
+				delete(duplicates, key)
+			} else {
+				dup.cleanup = verified
+			}
+		}
+	}
+
 	var result []duplicate
 	for _, dup := range duplicates {
 		sort.Slice(dup.cleanup, func(i, j int) bool {
@@ -287,6 +398,126 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].reference.abs < result[j].reference.abs
 	})
+
+	fmt.Fprintf(out, "Found %d duplicate groups\n", len(result))
+	return result
+}
+
+// findInternalDuplicates finds duplicates within a single tree.
+// The alphabetically first absolute path in each group is kept.
+func findInternalDuplicates(files []*file, mode Mode, ignoreCase bool, partial, unsafePartial bool, out *os.File) []duplicate {
+	fmt.Fprintf(out, "Finding internal duplicates using %s mode (case-insensitive: %v)...\n", mode, ignoreCase)
+	if partial {
+		if unsafePartial {
+			fmt.Fprintln(out, "Partial hash mode: 3×1 MB segments — verification SKIPPED (--unsafe)")
+		} else {
+			fmt.Fprintln(out, "Partial hash mode: 3×1 MB segments — full-hash verify enabled")
+		}
+	}
+
+	if mode == ModePathHash || mode == ModeHashOnly {
+		fmt.Fprintln(out, "Computing file hashes...")
+		if mode == ModeHashOnly {
+			// Size pre-filter: only hash files whose size appears at least twice.
+			sizeCount := make(map[int64]int, len(files))
+			for _, f := range files {
+				sizeCount[f.size]++
+			}
+			var toHash []*file
+			for _, f := range files {
+				if sizeCount[f.size] >= 2 {
+					toHash = append(toHash, f)
+				}
+			}
+			fmt.Fprintf(out, "Size pre-filter: hashing %d/%d files\n", len(toHash), len(files))
+			hashFiles(toHash, partial, os.Stdout)
+		} else {
+			hashFiles(files, partial, os.Stdout)
+		}
+	}
+
+	groups := make(map[string][]*file)
+
+	switch mode {
+	case ModePathOnly:
+		for _, f := range files {
+			key := normalizeForComparison(f.rel, ignoreCase)
+			groups[key] = append(groups[key], f)
+		}
+	case ModePathSize:
+		for _, f := range files {
+			key := normalizeForComparison(f.rel, ignoreCase) + "|" + fmt.Sprintf("%d", f.size)
+			groups[key] = append(groups[key], f)
+		}
+	case ModeFilenameSize:
+		for _, f := range files {
+			key := normalizeForComparison(filepath.Base(f.rel), ignoreCase) + "|" + fmt.Sprintf("%d", f.size)
+			groups[key] = append(groups[key], f)
+		}
+	case ModePathHash:
+		for _, f := range files {
+			if f.hash != "" {
+				key := normalizeForComparison(f.rel, ignoreCase) + "|" + f.hash
+				groups[key] = append(groups[key], f)
+			}
+		}
+	case ModeHashOnly:
+		for _, f := range files {
+			if f.hash != "" {
+				groups[f.hash] = append(groups[f.hash], f)
+			}
+		}
+	}
+
+	// Safe partial-hash verification: re-hash each group fully and re-split.
+	// A partial-hash group can legitimately split into multiple full-hash subgroups.
+	if mode == ModeHashOnly && partial && !unsafePartial {
+		fmt.Fprintln(out, "Verifying partial hash match groups with full hash...")
+		verified := make(map[string][]*file)
+		for _, group := range groups {
+			if len(group) < 2 {
+				continue
+			}
+			subGroups := make(map[string][]*file)
+			for _, f := range group {
+				fh, err := computeHash(f.abs)
+				if err != nil {
+					continue
+				}
+				subGroups[fh] = append(subGroups[fh], f)
+			}
+			for fh, sg := range subGroups {
+				if len(sg) >= 2 {
+					verified[fh] = sg
+				}
+			}
+		}
+		groups = verified
+	}
+
+	var result []duplicate
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		sort.Slice(group, func(i, j int) bool {
+			return group[i].abs < group[j].abs
+		})
+		result = append(result, duplicate{
+			reference: group[0],
+			cleanup:   group[1:],
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].reference.abs < result[j].reference.abs
+	})
+
+	for i := range result {
+		sort.Slice(result[i].cleanup, func(a, b int) bool {
+			return result[i].cleanup[a].abs < result[i].cleanup[b].abs
+		})
+	}
 
 	fmt.Fprintf(out, "Found %d duplicate groups\n", len(result))
 	return result
@@ -358,7 +589,6 @@ func processDuplicates(duplicates []duplicate, dryRun bool, delete bool, moveTo 
 	return nil
 }
 
-// removeEmptyDirs recursively removes empty directories
 func removeEmptyDirs(roots []string, dryRun bool, outFile *os.File) {
 	for _, root := range roots {
 		output(outFile, fmt.Sprintf("Cleaning empty directories in: %s", root))
@@ -367,14 +597,12 @@ func removeEmptyDirs(roots []string, dryRun bool, outFile *os.File) {
 	}
 }
 
-// removeEmptyDirsRecursive does the actual work and returns count of removed dirs
 func removeEmptyDirsRecursive(dir string, dryRun bool, outFile *os.File) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
 
-	// First, recursively process subdirectories
 	removedCount := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -383,13 +611,11 @@ func removeEmptyDirsRecursive(dir string, dryRun bool, outFile *os.File) int {
 		}
 	}
 
-	// Re-read directory to see if it's now empty (after processing subdirs)
 	entries, err = os.ReadDir(dir)
 	if err != nil {
 		return removedCount
 	}
 
-	// If directory is empty (and not the root of our cleanup trees), remove it
 	if len(entries) == 0 && dir != "" {
 		if dryRun {
 			output(outFile, fmt.Sprintf("  Would remove empty directory: %s", dir))
@@ -412,14 +638,30 @@ func run(cmd *cobra.Command, args []string) error {
 	outPath, _ := cmd.Flags().GetString("out")
 	keepEmptyDirs, _ := cmd.Flags().GetBool("keep-empty-dirs")
 	ignoreCase, _ := cmd.Flags().GetBool("ignore-case")
+	partialHash, _ := cmd.Flags().GetBool("partial-hash")
+	unsafePartial, _ := cmd.Flags().GetBool("unsafe")
 
 	mode := Mode(modeStr)
 	if mode != ModePathOnly && mode != ModePathSize && mode != ModeFilenameSize && mode != ModePathHash && mode != ModeHashOnly {
 		return fmt.Errorf("invalid mode: %s (use: path, path+size, filename+size, path+hash, hash)", modeStr)
 	}
 
-	if len(cleanup) == 0 {
-		return fmt.Errorf("at least one cleanup directory required")
+	if unsafePartial && !partialHash {
+		return fmt.Errorf("--unsafe requires --partial-hash")
+	}
+	if partialHash && mode != ModeHashOnly && mode != ModePathHash {
+		return fmt.Errorf("--partial-hash only applies to hash and path+hash modes")
+	}
+
+	// --- flexible validation for solo cleanup vs ref+cleanup ---
+	if reference != "" && len(cleanup) == 0 {
+		return fmt.Errorf("--cleanup is required when --reference is provided")
+	}
+	if reference == "" && len(cleanup) == 0 {
+		return fmt.Errorf("either --reference + --cleanup, or --cleanup alone is required")
+	}
+	if reference == "" && len(cleanup) > 1 {
+		return fmt.Errorf("internal dedupe requires exactly one --cleanup directory")
 	}
 
 	var outFile *os.File
@@ -440,27 +682,45 @@ func run(cmd *cobra.Command, args []string) error {
 
 	start := time.Now()
 
-	// Scan reference tree
-	output(outFile, fmt.Sprintf("Scanning reference tree: %s", reference))
-	referenceFiles, err := scanTree(reference, os.Stdout)
-	if err != nil {
-		return err
-	}
-	output(outFile, fmt.Sprintf("Found %d files in reference tree", len(referenceFiles)))
+	var duplicates []duplicate
+	var emptyDirRoots []string
 
-	// Scan cleanup trees
-	var allCleanupFiles []*file
-	for _, cleanupTree := range cleanup {
-		output(outFile, fmt.Sprintf("Scanning cleanup tree: %s", cleanupTree))
-		cleanupFiles, err := scanTree(cleanupTree, os.Stdout)
+	if reference == "" {
+		// --- SOLO CLEANUP = INTERNAL DEDUPE ---
+		soloTree := cleanup[0]
+		output(outFile, fmt.Sprintf("Scanning tree: %s", soloTree))
+		files, err := scanTree(soloTree, os.Stdout)
 		if err != nil {
 			return err
 		}
-		output(outFile, fmt.Sprintf("Found %d files in cleanup tree", len(cleanupFiles)))
-		allCleanupFiles = append(allCleanupFiles, cleanupFiles...)
+		output(outFile, fmt.Sprintf("Found %d files", len(files)))
+
+		duplicates = findInternalDuplicates(files, mode, ignoreCase, partialHash, unsafePartial, outFile)
+		emptyDirRoots = []string{soloTree}
+	} else {
+		// --- REFERENCE + CLEANUP ---
+		output(outFile, fmt.Sprintf("Scanning reference tree: %s", reference))
+		referenceFiles, err := scanTree(reference, os.Stdout)
+		if err != nil {
+			return err
+		}
+		output(outFile, fmt.Sprintf("Found %d files in reference tree", len(referenceFiles)))
+
+		var allCleanupFiles []*file
+		for _, cleanupTree := range cleanup {
+			output(outFile, fmt.Sprintf("Scanning cleanup tree: %s", cleanupTree))
+			cleanupFiles, err := scanTree(cleanupTree, os.Stdout)
+			if err != nil {
+				return err
+			}
+			output(outFile, fmt.Sprintf("Found %d files in cleanup tree", len(cleanupFiles)))
+			allCleanupFiles = append(allCleanupFiles, cleanupFiles...)
+		}
+
+		duplicates = findDuplicates(referenceFiles, allCleanupFiles, mode, ignoreCase, partialHash, unsafePartial, outFile)
+		emptyDirRoots = cleanup
 	}
 
-	duplicates := findDuplicates(referenceFiles, allCleanupFiles, mode, ignoreCase, outFile)
 	if len(duplicates) == 0 {
 		output(outFile, "No duplicates found.")
 		return nil
@@ -495,7 +755,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// Empty directory cleanup (if not disabled)
 	if !keepEmptyDirs {
 		output(outFile, "\n=== Empty Directory Cleanup ===")
-		removeEmptyDirs(cleanup, false, outFile)
+		removeEmptyDirs(emptyDirRoots, false, outFile)
 	}
 
 	elapsed := time.Since(start)
@@ -511,12 +771,12 @@ var Cmd = &cobra.Command{
 
 func init() {
 	Cmd.Flags().String("reference", "", "reference tree (files to keep, never modified)")
-	Cmd.Flags().StringSlice("cleanup", nil, "trees to clean up (remove duplicates from)")
+	Cmd.Flags().StringSlice("cleanup", nil, "trees to clean up (remove duplicates from); use alone for internal dedupe")
 	Cmd.Flags().String("mode", "hash", "dedup mode: path | path+size | filename+size | path+hash | hash")
 	Cmd.Flags().String("move-to", "", "move duplicates to directory")
 	Cmd.Flags().String("out", "", "output report file")
 	Cmd.Flags().Bool("keep-empty-dirs", false, "keep empty directories (default: remove them after deduplication)")
 	Cmd.Flags().Bool("ignore-case", true, "case-insensitive path/filename matching (default: true)")
-	Cmd.MarkFlagRequired("reference")
-	Cmd.MarkFlagRequired("cleanup")
+	Cmd.Flags().Bool("partial-hash", false, "hash 3×1 MB segments (header+center+footer) instead of full files; fastest for large media; requires hash or path+hash mode")
+	Cmd.Flags().Bool("unsafe", false, "with --partial-hash: skip full-hash verification of matches (faster, near-zero false positive risk for photos/videos)")
 }
