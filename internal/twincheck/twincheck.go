@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +16,12 @@ import (
 
 type FileMap map[string]int64
 
-func getFilesConcurrent(base string) (FileMap, error) {
+// Normalize path for case-agnostic comparison
+func normalizePath(path string) string {
+	return strings.ToLower(path)
+}
+
+func getFilesConcurrent(base string, caseSensitive bool) (FileMap, error) {
 	files := make(FileMap)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -40,6 +46,9 @@ func getFilesConcurrent(base string) (FileMap, error) {
 				rel, err := filepath.Rel(base, fullPath)
 				if err != nil {
 					continue
+				}
+				if !caseSensitive {
+					rel = normalizePath(rel)
 				}
 				mu.Lock()
 				files[rel] = info.Size()
@@ -67,7 +76,7 @@ func hashFile(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func hashFiles(base string, paths []string) map[string]string {
+func hashFiles(base string, paths []string, caseSensitive bool) map[string]string {
 	if len(paths) == 0 {
 		return make(map[string]string)
 	}
@@ -92,10 +101,14 @@ func hashFiles(base string, paths []string) map[string]string {
 			defer wg.Done()
 			for rel := range jobs {
 				if h, err := hashFile(filepath.Join(base, rel)); err == nil {
+					resultPath := rel
+					if !caseSensitive {
+						resultPath = normalizePath(rel)
+					}
 					results <- struct {
 						path string
 						hash string
-					}{rel, h}
+					}{resultPath, h}
 				}
 			}
 		}()
@@ -184,13 +197,13 @@ func compareOff(filesA, filesB FileMap, mode string, outFile *os.File) {
 }
 
 // === Mode: smart (your preferred) ===
-func compareSmart(driveA, driveB string, mode string, outFile *os.File) error {
+func compareSmart(driveA, driveB string, mode string, outFile *os.File, caseSensitive bool) error {
 	output(outFile, fmt.Sprintf("Scanning %s...", driveA))
-	filesA, _ := getFilesConcurrent(driveA)
+	filesA, _ := getFilesConcurrent(driveA, caseSensitive)
 	output(outFile, fmt.Sprintf("Found %d files in %s", len(filesA), driveA))
 
 	output(outFile, fmt.Sprintf("Scanning %s...", driveB))
-	filesB, _ := getFilesConcurrent(driveB)
+	filesB, _ := getFilesConcurrent(driveB, caseSensitive)
 	output(outFile, fmt.Sprintf("Found %d files in %s", len(filesB), driveB))
 
 	var missingInB, missingInA []string
@@ -228,8 +241,8 @@ func compareSmart(driveA, driveB string, mode string, outFile *os.File) error {
 		}
 
 		if len(toHashA) > 0 {
-			hashesA := hashFiles(driveA, toHashA)
-			hashesB := hashFiles(driveB, toHashB)
+			hashesA := hashFiles(driveA, toHashA, caseSensitive)
+			hashesB := hashFiles(driveB, toHashB, caseSensitive)
 			hashSetB := make(map[string]bool)
 			for _, h := range hashesB {
 				hashSetB[h] = true
@@ -264,8 +277,8 @@ func compareSmart(driveA, driveB string, mode string, outFile *os.File) error {
 		}
 
 		if len(toHashB2) > 0 {
-			hashesB := hashFiles(driveB, toHashB2)
-			hashesA := hashFiles(driveA, toHashA2)
+			hashesB := hashFiles(driveB, toHashB2, caseSensitive)
+			hashesA := hashFiles(driveA, toHashA2, caseSensitive)
 			hashSetA := make(map[string]bool)
 			for _, h := range hashesA {
 				hashSetA[h] = true
@@ -314,9 +327,9 @@ func compareSmart(driveA, driveB string, mode string, outFile *os.File) error {
 }
 
 // === Mode: strict (global content search) ===
-func compareStrict(driveA, driveB string, mode string, outFile *os.File) error {
+func compareStrict(driveA, driveB string, mode string, outFile *os.File, caseSensitive bool) error {
 	output(outFile, fmt.Sprintf("Scanning %s...", driveA))
-	sizesA, _ := scanBySize(driveA)
+	sizesA, _ := scanBySize(driveA, caseSensitive)
 	totalA := 0
 	for _, paths := range sizesA {
 		totalA += len(paths)
@@ -324,7 +337,7 @@ func compareStrict(driveA, driveB string, mode string, outFile *os.File) error {
 	output(outFile, fmt.Sprintf("Found %d files in %s", totalA, driveA))
 
 	output(outFile, fmt.Sprintf("Scanning %s...", driveB))
-	sizesB, _ := scanBySize(driveB)
+	sizesB, _ := scanBySize(driveB, caseSensitive)
 	totalB := 0
 	for _, paths := range sizesB {
 		totalB += len(paths)
@@ -351,8 +364,8 @@ func compareStrict(driveA, driveB string, mode string, outFile *os.File) error {
 		}
 	}
 
-	hashesA := hashFiles(driveA, candidatesA)
-	hashesB := hashFiles(driveB, candidatesB)
+	hashesA := hashFiles(driveA, candidatesA, caseSensitive)
+	hashesB := hashFiles(driveB, candidatesB, caseSensitive)
 
 	hashSetB := make(map[string]bool)
 	for _, h := range hashesB {
@@ -427,7 +440,7 @@ func compareStrict(driveA, driveB string, mode string, outFile *os.File) error {
 }
 
 // Helper for strict mode
-func scanBySize(base string) (map[int64][]string, error) {
+func scanBySize(base string, caseSensitive bool) (map[int64][]string, error) {
 	groups := make(map[int64][]string)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -453,6 +466,9 @@ func scanBySize(base string) (map[int64][]string, error) {
 				if err != nil {
 					continue
 				}
+				if !caseSensitive {
+					rel = normalizePath(rel)
+				}
 				mu.Lock()
 				groups[info.Size()] = append(groups[info.Size()], rel)
 				mu.Unlock()
@@ -474,6 +490,7 @@ func run(cmd *cobra.Command, args []string) error {
 	outPath, _ := cmd.Flags().GetString("out")
 	useHashFlag, _ := cmd.Flags().GetBool("hash")
 	hashMode, _ := cmd.Flags().GetString("hash-mode")
+	caseSensitive, _ := cmd.Flags().GetBool("case-sensitive")
 
 	// Resolve effective mode
 	effectiveMode := "off"
@@ -498,25 +515,31 @@ func run(cmd *cobra.Command, args []string) error {
 		defer outFile.Close()
 	}
 
+	if !caseSensitive {
+		output(outFile, "Running in case-insensitive mode (paths normalized to lowercase)")
+	} else {
+		output(outFile, "Running in case-sensitive mode")
+	}
+
 	start := time.Now()
 	var err error
 	switch effectiveMode {
 	case "off":
 		output(outFile, "Running in 'off' mode: path+size only (no hashing).")
 		output(outFile, fmt.Sprintf("Scanning %s...", driveA))
-		filesA, _ := getFilesConcurrent(driveA)
+		filesA, _ := getFilesConcurrent(driveA, caseSensitive)
 		output(outFile, fmt.Sprintf("Found %d files in %s", len(filesA), driveA))
 
 		output(outFile, fmt.Sprintf("Scanning %s...", driveB))
-		filesB, _ := getFilesConcurrent(driveB)
+		filesB, _ := getFilesConcurrent(driveB, caseSensitive)
 		output(outFile, fmt.Sprintf("Found %d files in %s", len(filesB), driveB))
 		compareOff(filesA, filesB, mode, outFile)
 	case "smart":
 		output(outFile, "Running in 'smart' mode: hashing only missing-by-path files.")
-		err = compareSmart(driveA, driveB, mode, outFile)
+		err = compareSmart(driveA, driveB, mode, outFile, caseSensitive)
 	case "strict":
 		output(outFile, "Running in 'strict' mode: global content comparison (may be slow).")
-		err = compareStrict(driveA, driveB, mode, outFile)
+		err = compareStrict(driveA, driveB, mode, outFile, caseSensitive)
 	default:
 		return fmt.Errorf("invalid hash-mode: %s (use: off, smart, strict)", effectiveMode)
 	}
@@ -543,4 +566,5 @@ func init() {
 	Cmd.Flags().StringP("out", "o", "", "optional output file")
 	Cmd.Flags().BoolP("hash", "H", false, "shorthand for --hash-mode=smart")
 	Cmd.Flags().String("hash-mode", "off", "hashing behavior: off | smart | strict")
+	Cmd.Flags().Bool("case-sensitive", false, "enable case-sensitive path comparison (default is case-insensitive)")
 }
