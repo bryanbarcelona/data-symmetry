@@ -24,6 +24,7 @@ const (
 	ModePathHash     Mode = "path+hash"
 	ModeHashOnly     Mode = "hash"
 	ModeFilenameSize Mode = "filename+size"
+	ModePixelHash    Mode = "pixel-hash"
 )
 
 const (
@@ -32,11 +33,15 @@ const (
 )
 
 type file struct {
-	root string
-	rel  string
-	abs  string
-	size int64
-	hash string
+	root      string
+	rel       string
+	abs       string
+	size      int64
+	hash      string
+	isImage   bool
+	width     int
+	height    int
+	pixelHash string
 }
 
 type duplicate struct {
@@ -291,6 +296,11 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 			hashFiles(referenceFiles, partial, os.Stdout)
 			hashFiles(cleanupFiles, partial, os.Stdout)
 		}
+	} else if mode == ModePixelHash {
+		filteredRef, filteredCleanup := filterByDimensions(referenceFiles, cleanupFiles, out)
+		fmt.Fprintln(out, "Computing pixel hashes...")
+		hashImages(filteredRef, os.Stdout)
+		hashImages(filteredCleanup, os.Stdout)
 	}
 
 	referenceIndex := make(map[string]*file)
@@ -323,6 +333,12 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 				referenceIndex[f.hash] = f
 			}
 		}
+	case ModePixelHash:
+		for _, f := range referenceFiles {
+			if f.pixelHash != "" {
+				referenceIndex[f.pixelHash] = f
+			}
+		}
 	}
 
 	duplicates := make(map[string]*duplicate)
@@ -343,6 +359,10 @@ func findDuplicates(referenceFiles, cleanupFiles []*file, mode Mode, ignoreCase 
 		case ModeHashOnly:
 			if cleanupFile.hash != "" {
 				key = cleanupFile.hash
+			}
+		case ModePixelHash:
+			if cleanupFile.pixelHash != "" {
+				key = cleanupFile.pixelHash
 			}
 		}
 
@@ -434,6 +454,10 @@ func findInternalDuplicates(files []*file, mode Mode, ignoreCase bool, partial, 
 		} else {
 			hashFiles(files, partial, os.Stdout)
 		}
+	} else if mode == ModePixelHash {
+		toHash := filterByDimensionCount(files, out)
+		fmt.Fprintln(out, "Computing pixel hashes...")
+		hashImages(toHash, os.Stdout)
 	}
 
 	groups := make(map[string][]*file)
@@ -465,6 +489,12 @@ func findInternalDuplicates(files []*file, mode Mode, ignoreCase bool, partial, 
 		for _, f := range files {
 			if f.hash != "" {
 				groups[f.hash] = append(groups[f.hash], f)
+			}
+		}
+	case ModePixelHash:
+		for _, f := range files {
+			if f.pixelHash != "" {
+				groups[f.pixelHash] = append(groups[f.pixelHash], f)
 			}
 		}
 	}
@@ -642,8 +672,8 @@ func run(cmd *cobra.Command, args []string) error {
 	unsafePartial, _ := cmd.Flags().GetBool("unsafe")
 
 	mode := Mode(modeStr)
-	if mode != ModePathOnly && mode != ModePathSize && mode != ModeFilenameSize && mode != ModePathHash && mode != ModeHashOnly {
-		return fmt.Errorf("invalid mode: %s (use: path, path+size, filename+size, path+hash, hash)", modeStr)
+	if mode != ModePathOnly && mode != ModePathSize && mode != ModeFilenameSize && mode != ModePathHash && mode != ModeHashOnly && mode != ModePixelHash {
+		return fmt.Errorf("invalid mode: %s (use: path, path+size, filename+size, path+hash, hash, pixel-hash)", modeStr)
 	}
 
 	if unsafePartial && !partialHash {
@@ -772,7 +802,7 @@ var Cmd = &cobra.Command{
 func init() {
 	Cmd.Flags().String("reference", "", "reference tree (files to keep, never modified)")
 	Cmd.Flags().StringSlice("cleanup", nil, "trees to clean up (remove duplicates from); use alone for internal dedupe")
-	Cmd.Flags().String("mode", "hash", "dedup mode: path | path+size | filename+size | path+hash | hash")
+	Cmd.Flags().String("mode", "hash", "dedup mode: path | path+size | filename+size | path+hash | hash | pixel-hash")
 	Cmd.Flags().String("move-to", "", "move duplicates to directory")
 	Cmd.Flags().String("out", "", "output report file")
 	Cmd.Flags().Bool("keep-empty-dirs", false, "keep empty directories (default: remove them after deduplication)")
