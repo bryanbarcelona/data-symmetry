@@ -45,13 +45,14 @@ Removes duplicate files from one or more cleanup directories. Supports two modes
   * **`path+size`**: Same relative path and file size.
   * **`filename+size`**: Same filename and file size, regardless of subdirectory.
   * **`path+hash`**: Same relative path and content hash.
-  * **`hash`** *(default)*: Same content hash only. Most thorough — catches renamed or moved duplicates.
+  * **`hash`** *(default)*: Same content hash only. Most thorough of the byte-level modes — catches renamed or moved duplicates.
+  * **`pixel-hash`**: Decodes each image and hashes its raw pixel data instead of its file bytes, so two images with identical pixels match even if they differ in metadata, encoder, compression level, or container format entirely (e.g. a re-saved PNG, or the same photo as a JPEG and a TIFF). Supports JPEG, PNG, GIF, WebP, BMP, TIFF, and HEIC. Non-image files are skipped automatically.
 
   **Hashing optimization flags** (applies to `hash` and `path+hash` modes):
   * **`--partial-hash`**: Instead of reading entire files, hashes three 1 MB segments: the first 1 MB (header), 1 MB from the exact midpoint (center), and the last 1 MB (footer). Files under 3 MB are fully hashed automatically. Dramatically faster for large media collections.
   * **`--unsafe`**: Requires `--partial-hash`. Skips the full-hash verification pass that runs after partial matches. Near-zero false-positive risk for photos and videos (EXIF headers and compressed frame data at the midpoint are unique per file), but not recommended for arbitrary file types.
 
-  In `hash` mode, a **size pre-filter** always runs first: only files whose size appears in both trees are ever read or hashed. Unique-sized files are skipped entirely.
+  In `hash` mode, a **size pre-filter** always runs first: only files whose size appears in both trees are ever read or hashed. Unique-sized files are skipped entirely. `pixel-hash` mode runs the equivalent **dimension pre-filter**: only images whose width×height appears in both trees are fully decoded and hashed.
 
 ### 4\. `cachewhack`
 
@@ -136,6 +137,9 @@ ds dupekill --reference /master --cleanup /incoming --mode filename+size
 
 # Move duplicates to a folder instead of deleting them
 ds dupekill --reference /master --cleanup /archive --move-to /trash/dupes
+
+# Match images by actual pixel content, ignoring metadata/format/re-encoding
+ds dupekill --reference /master/photos --cleanup /downloads --mode pixel-hash
 ```
 
 ### `ds cachewhack` Examples
